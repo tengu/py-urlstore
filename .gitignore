@@ -1,0 +1,10 @@
+*.pyc
+x.*
+x
+xx
+*-ve
+tmp
+old
+dist
+build
+MANIFEST
