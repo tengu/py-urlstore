@@ -1,0 +1,34 @@
+urlstore: cached url fetch as unix pipe
+
+The command takes a stream of urls from stdin and outputs contents:
+$ cat urls | urlstore.py fetch | process-the-output
+
+When pointed to a JSON api, urlstore acts as a unix pipe to convert 
+lines of url to the json output stream:
+
+echo http://github.com/api/v2/json/repos/search/url+store \
+	| python urlstore.py fetch \
+	| json-cut repositories/[]/name
+url_store
+url-store
+urlStore
+
+The main usage is to avoid hitting a site with same url while 
+investigating the api.  After the first invocation, the content 
+is fetched from a local store, so you can rapidly iterate like you 
+are grepping a local file.
+
+API
+Url that returns JSON can be converted to python data by store.data(url):
+
+>>> from urlstore import Store
+>>> store=Store()
+    # convert url to data (assuming that the url returns json)
+>>> for repo in store.data('http://github.com/api/v2/json/repos/search/url+store')['repositories']:
+...     print repo['name']
+...
+url_store
+url-store
+urlStore
+
+
