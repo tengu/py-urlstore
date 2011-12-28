@@ -357,7 +357,7 @@ if __name__=='__main__':
 
     @baker.command
     def dump(store_dir='./x.urlstore'):
-        """ for urls fed to stdin, dump store entry info
+        """ for each url fed to stdin, dump store entry info.
             usage:
             $ echo http://localhost/ | urlstore.py dump
         """
