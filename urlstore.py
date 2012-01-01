@@ -33,6 +33,19 @@ url_store
 url-store
 urlStore
 
+Features:
+* builtin niceness guard so you don't get banned from the site.
+* simple filesystem-based store: $stor_dir/$entry_id/{content,md}
+  - entry_id is the md5 of url.
+  - content contains the response body
+  - md contains headers and other metadata as json
+
+TODO:
+* add cache policy
+* make sure fetch start (not end time) time is used for niceness 
+* heed throttling warning headers from the server.
+* option to dump headers to stderr
+
 """
 import sys,os
 import fcntl
@@ -93,7 +106,19 @@ from urlparse import urlparse
 
 default_useragent_string='UrlStore/1.0'
 
-class UrlTimeout(Exception): pass
+class UrlError(Exception): 
+    def __repr__(self):
+        return str(self)
+    def __str__(self):
+        try:
+            attrs=dict(self.args)
+            return "%s	%s" % (attrs['error'], attrs['url'])
+        except:
+            return str(self.args)
+
+class UrlTimeout(UrlError): pass
+class UrlNotFound(UrlError): pass
+class UrlUnauthorized(UrlError): pass
 
 class Nicer(object):
     """ manage niceness constraints
@@ -138,7 +163,6 @@ class UserAgent(object):
 
         self.nicer.be_nice(url)
 
-        print >>sys.stderr, 'fetch:', url # xx logging
         req=urllib2.Request(url)
         self.customize_hdr(req)
         opt=dict(timeout=self.timeout)
@@ -146,12 +170,24 @@ class UserAgent(object):
 
         try:
             r=urllib2.urlopen(req, **opt)
+
         except urllib2.URLError, e:
+            # because the exceptions that urllib2 throw is unwieldy, 
+            # wrap them in our own hierarchy for ease of catching.
             if hasattr(e,'reason') and isinstance(e.reason, socket.timeout):
-                raise UrlTimeout(('timeout', opt.get('timeout')), ('url', url))
+                raise UrlTimeout(('timeout', opt.get('timeout')), ('url', url), 
+                                 ('error', e))
+
+            elif hasattr(e,'code') and e.code==404:
+                raise UrlNotFound(('url', url), ('error', e))
+                
+            elif hasattr(e,'code') and e.code==401:
+                raise UrlUnauthorized(('url', url), ('error', e))
+                
             else:
-                # xx wrap exception to bubble the url.
+                e.args+=(url,)
                 raise
+
         return r
 
 #### store entry
@@ -247,6 +283,7 @@ class Store(object):
         """
 
         entry, status=self._retrieve(url)
+        print >>sys.stderr, "%s\t%s" % (status, url) # xx logging
 
         return entry
 
@@ -353,7 +390,22 @@ if __name__=='__main__':
         store=Store(store_dir)
 
         for url in line_stream():
-            print store.content(url)
+            try:
+                print store.content(url)
+            except UrlError, e:
+                print >>sys.stderr, e
+
+    @baker.command
+    def fetch_json(store_dir='./x.urlstore', request_url_key='_request_url'):
+        """like fetch but request url is added to the json output.
+        """
+
+        store=Store(store_dir)
+
+        for url in line_stream():
+            data=json.loads(store.content(url))
+            data[request_url_key]=url
+            print json.dumps(data)
 
     @baker.command
     def dump(store_dir='./x.urlstore'):
