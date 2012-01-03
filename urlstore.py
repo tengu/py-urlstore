@@ -403,7 +403,12 @@ if __name__=='__main__':
         store=Store(store_dir)
 
         for url in line_stream():
-            data=json.loads(store.content(url))
+            try:
+                data_json=store.content(url)
+            except UrlError, e:
+                print >>sys.stderr, e
+                continue
+            data=json.loads(data_json)
             data[request_url_key]=url
             print json.dumps(data)
 
