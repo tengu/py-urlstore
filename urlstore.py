@@ -386,14 +386,14 @@ if __name__=='__main__':
     import baker
 
     @baker.command
-    def fetch(store_dir='./x.urlstore'):
+    def fetch(store_dir='./x.urlstore', niceness=3):
         """ read urls from stdin.
             print response body to stdout.
             usage:
             $ echo http://localhost/ | urlstore.py fetch
         """
 
-        store=Store(store_dir)
+        store=Store(store_dir, niceness=int(niceness))
 
         for url in line_stream():
             try:
