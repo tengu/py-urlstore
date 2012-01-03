@@ -241,6 +241,9 @@ class Store(object):
 
         mkdir_p(self.store_dir)
 
+    def __repr__(self):
+        return 'Store("%s")' % (self.store_dir)
+
     def url_to_id(self, url):
         # xxx perform generic normalizations.
         # xxx allow custom normalizations.
@@ -259,7 +262,9 @@ class Store(object):
 
     def entry_path(self, id):
         """ id --> entry-path """
-        return os.path.join(self.store_dir, id)
+        if id.startswith('_tmp'):
+            return os.path.join(self.store_dir, id)
+        return os.path.join(self.store_dir, id[:2], id)
 
     def entry(self, id, *args, **kw):
         """ create a volatile/non-persisted entry """
@@ -361,6 +366,7 @@ class Store(object):
 
         # mv {id}.tmp {id}
         entry=self.entry(id)
+        mkdir_p(entry.dir_path)
         os.rename(tentry.dir_path, entry.dir_path)
         
         return entry
@@ -426,5 +432,20 @@ if __name__=='__main__':
             print entry
             print entry.data_path
             print entry.md_path
+
+    @baker.command
+    def migrate(store_dir='./x.urlstore'):
+        """migrate store layout"""
+        store=Store(store_dir)
+        from subprocess import Popen, PIPE
+        find=Popen(['/usr/bin/find',store.store_dir,'-mindepth','1','-maxdepth','1'],
+                  stdout=PIPE)
+        for entry_path in line_stream(find.stdout):
+            entry_id=os.path.basename(entry_path)
+            print entry_path
+            new_entry_path=store.entry_path(entry_id)
+            mkdir_p(new_entry_path)
+            os.rename(entry_path, new_entry_path)
+        find.wait()
 
     baker.run()
