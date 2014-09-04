@@ -89,6 +89,7 @@ def mkdir_p(newdir):
 
 def rm_rf(p):
     """ rm -fr use at your own risk """
+
     if not os.path.exists(p):
         pass
     elif os.path.isdir(p):
@@ -145,11 +146,11 @@ class UserAgent(object):
     """ urllib2 helper to manage UserAgent header """
 
     def __init__(self,
-                 useragent_string=default_useragent_string, 
+                 useragent_string=None, 
                  timeout=60,
-                 niceness=3,
+                 niceness=30,
                  ):
-        self.useragent_string=useragent_string
+        self.useragent_string=useragent_string or default_useragent_string
         self.timeout=60         # default timeout
         self.nicer=Nicer(niceness)
 
@@ -233,11 +234,12 @@ class Store(object):
 
     def __init__(self, 
                  store_dir='./x.urlstore', 
-                 niceness=3,
+                 niceness=30,
+                 useragent=None,
                  entry_cls=Entry):
         self.store_dir=store_dir
         self.entry_cls=entry_cls
-        self.ua=UserAgent()
+        self.ua=UserAgent(useragent_string=useragent, niceness=niceness)
 
         mkdir_p(self.store_dir)
 
@@ -300,7 +302,7 @@ class Store(object):
 
         return self.fetch(url), 'fetched'
 
-    def fetch(self, url, clobber=False):
+    def fetch(self, url, clear=False):
         """ fetch and store
         """
 
@@ -308,7 +310,7 @@ class Store(object):
 
         if not self.entry_exists(id):
             pass
-        elif clobber:
+        elif clear:
             rm_rf(self.entry_path(id))
         else:
             raise EntryExists(self.entry_path(id))
@@ -386,14 +388,14 @@ if __name__=='__main__':
     import baker
 
     @baker.command
-    def fetch(store_dir='./x.urlstore', niceness=3):
+    def fetch(store_dir='./x.urlstore', niceness=30, useragent=None):
         """ read urls from stdin.
             print response body to stdout.
             usage:
             $ echo http://localhost/ | urlstore.py fetch
         """
 
-        store=Store(store_dir, niceness=int(niceness))
+        store=Store(store_dir, niceness=int(niceness), useragent=useragent)
 
         for url in line_stream():
             try:
@@ -402,21 +404,24 @@ if __name__=='__main__':
                 print >>sys.stderr, e
 
     @baker.command
-    def fetch_json(store_dir='./x.urlstore', request_url_key='_request_url'):
-        """like fetch but request url is added to the json output.
+    def fetch_json(store_dir='./x.urlstore', url_key='url', res_key='res', niceness=30, useragent=None):
+        """ { .. url .. } --> { .. url, res .. }
         """
 
-        store=Store(store_dir)
+        store=Store(store_dir, niceness=int(niceness), useragent=useragent)
 
-        for url in line_stream():
+        for line in sys.stdin.readlines():
+            val=json.loads(line)
+            url=val[url_key]
             try:
                 data_json=store.content(url)
             except UrlError, e:
                 print >>sys.stderr, e
                 continue
             data=json.loads(data_json)
-            data[request_url_key]=url
-            print json.dumps(data)
+            val[res_key]=data
+            print json.dumps(val)
+            sys.stdout.flush()
 
     @baker.command
     def dump(store_dir='./x.urlstore'):
