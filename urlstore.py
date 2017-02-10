@@ -48,10 +48,20 @@ TODO:
 
 """
 import sys,os
+import re
 import fcntl
 import hashlib
+import httplib
 import json
 from tempfile import mkdtemp
+import subprocess
+
+def tostr(s):
+    if isinstance(s, str):
+        return s
+    if isinstance(s, unicode):
+        return s.encode('utf8')
+    raise ValueError('not a str or unicode', type(s), s)
 
 #### util
 def line_stream(filehandle=sys.stdin):
@@ -85,7 +95,9 @@ def mkdir_p(newdir):
         if head and not os.path.isdir(head):
             mkdir_p(head)
         if tail:
-            os.mkdir(newdir)
+            os.mkdir(newdir, 0775)
+            # xxx debug
+            # subprocess.call(["ls", "-ld", newdir])
 
 def rm_rf(p):
     """ rm -fr use at your own risk """
@@ -105,17 +117,71 @@ import urllib2
 import socket
 from urlparse import urlparse
 
+# xxx always demand this from the user
 default_useragent_string='UrlStore/1.0'
+
+class Headers(dict):
+
+    def __init__(self, dct, typ=None):
+        self.type=typ or 'text/plain'
+        self.update(dct)
+
+class ErrorResponse(object):
+    
+    def __init__(self, url, exception, headers=None, msg=None):
+        self.url=url
+        self.exception=exception
+        self.headers=Headers(headers or {})
+        self.error_type, self.code=self.classify(exception)
+
+        reason=getattr(self.exception, 'reason', '')
+        reason=str(reason) if reason else ''
+        self.error_message=filter(None, [reason, msg])
+
+
+    def __repr__(self):
+        return repr(self.exception)
+
+    def __str__(self):
+        return str(self.exception)
+
+    def read(self):
+
+        return repr(self.error_message)
+
+    @classmethod
+    def classify(cls, e):
+        """
+        exception --> (error-label, http-status-code)
+        """
+
+        # xx complete
+        code_to_msg={
+            404: "NotFound",
+            401: "Unauthorized",
+        }
+
+        label,code,msg=None,None,None
+
+        if isinstance(e, socket.timeout):
+            label='TimeOut'
+        elif hasattr(e,'reason') and isinstance(e.reason, socket.timeout): # xx deprecate?
+            label='TimeOut'
+        elif hasattr(e,'code'):
+            code=e.code
+            label=code_to_msg.get(code, "HttpError")
+        elif 'Name or service not known' in str(e):
+            label='ResolverError'
+        else:
+            label='HttpError'
+
+        return label,code
+        
+        
 
 class UrlError(Exception): 
     def __repr__(self):
-        return str(self)
-    def __str__(self):
-        try:
-            attrs=dict(self.args)
-            return "%s	%s" % (attrs['error'], attrs['url'])
-        except:
-            return str(self.args)
+        return repr(self.args)
 
 class UrlTimeout(UrlError): pass
 class UrlNotFound(UrlError): pass
@@ -139,6 +205,7 @@ class Nicer(object):
         shortfall=self.niceness-elapsed.seconds
         if shortfall>0:
             print >>sys.stderr, 'sleeping', shortfall, host
+            sys.stderr.flush()
             time.sleep(shortfall)
         self.host_last_hit[host]=datetime.now()
 
@@ -147,11 +214,11 @@ class UserAgent(object):
 
     def __init__(self,
                  useragent_string=None, 
-                 timeout=60,
+                 timeout=3,
                  niceness=30,
                  ):
         self.useragent_string=useragent_string or default_useragent_string
-        self.timeout=60         # default timeout
+        self.timeout=timeout
         self.nicer=Nicer(niceness)
 
     def customize_hdr(self, urllib2_request):
@@ -164,32 +231,19 @@ class UserAgent(object):
 
         self.nicer.be_nice(url)
 
-        req=urllib2.Request(url)
+        req=urllib2.Request(url.encode('utf8'))
         self.customize_hdr(req)
         opt=dict(timeout=self.timeout)
         opt.update(kw)
 
         try:
-            r=urllib2.urlopen(req, **opt)
-
+            return urllib2.urlopen(req, **opt)
         except urllib2.URLError, e:
-            # because the exceptions that urllib2 throw is unwieldy, 
-            # wrap them in our own hierarchy for ease of catching.
-            if hasattr(e,'reason') and isinstance(e.reason, socket.timeout):
-                raise UrlTimeout(('timeout', opt.get('timeout')), ('url', url), 
-                                 ('error', e))
+            return ErrorResponse(url, e)
+        except socket.timeout, e:
+            msg=dict(timeout=self.timeout)
+            return ErrorResponse(url, e, msg=msg)
 
-            elif hasattr(e,'code') and e.code==404:
-                raise UrlNotFound(('url', url), ('error', e))
-                
-            elif hasattr(e,'code') and e.code==401:
-                raise UrlUnauthorized(('url', url), ('error', e))
-                
-            else:
-                e.args+=(url,)
-                raise
-
-        return r
 
 #### store entry
 class EntryExists(Exception):
@@ -205,9 +259,10 @@ class Entry(object):
         self.data_path=os.path.join(self.dir_path, 'content')
         self.md_path=os.path.join(self.dir_path, 'md')
         self.lock_path=os.path.join(self.dir_path, 'lock')
+        self._md=None           # cached md dict
 
     def __repr__(self):
-        return 'entry("%s")' % (self.id,)
+        return 'Entry("%s")' % (self.id,)
 
     def exists(self):
         """ am I persisted """
@@ -228,6 +283,36 @@ class Entry(object):
         f=file(self.lock_path, 'w')
         fcntl.flock(f.fileno(), fcntl.LOCK_UN)
 
+    def md(self):
+        if not self._md:
+            self._md=json.load(file(self.md_path))
+            self._md.update(entry=dict(data_path=self.data_path,
+                                       md_path=self.md_path,
+                                       id=self.id))
+        return self._md
+
+    def _content_type(self):
+        return self.md().get('headers', {}).get('content-type', '')
+
+    def content_type(self):
+        """parsed content type
+        example: "text/html; charset=utf-8"  --->  ('text', 'html'), {'charset': 'utf-8'}
+        usage: mtype,attrs=entry.content_type()
+               assert mtype==('text','html') and attrs.get('charset')=='utf8'
+        """
+        # xx surprisingly, I could not find a standard lib to do this simply..
+        terms=[ term.strip() for term in self._content_type().lower().split(';') ]
+        mtype=terms.pop(0)
+        mtype_pair=(mtype.split('/')+[None])[:2]
+        pairs=[ term.split('=',1) for term in terms ]
+        return tuple(mtype_pair), dict([ pair for pair in pairs if len(pair)==2 ])
+
+    def fetch_time(self):
+        """fetch time as datetime"""
+
+        return datetime.fromtimestamp(self.md()['timestamp']) #.replace(tzinfo=pytz.UTC)
+
+
 class Store(object):
     """ simple url-keyed web object store.
     """
@@ -235,11 +320,12 @@ class Store(object):
     def __init__(self, 
                  store_dir='./x.urlstore', 
                  niceness=30,
+                 timeout=5,
                  useragent=None,
                  entry_cls=Entry):
         self.store_dir=store_dir
         self.entry_cls=entry_cls
-        self.ua=UserAgent(useragent_string=useragent, niceness=niceness)
+        self.ua=UserAgent(useragent_string=useragent, niceness=niceness, timeout=timeout)
 
         mkdir_p(self.store_dir)
 
@@ -249,7 +335,7 @@ class Store(object):
     def url_to_id(self, url):
         # xxx perform generic normalizations.
         # xxx allow custom normalizations.
-        return hashlib.md5(url).hexdigest()
+        return hashlib.md5(url.encode('utf8')).hexdigest()
 
     def ids(self):
         """ enumerate stored ids.
@@ -291,6 +377,7 @@ class Store(object):
 
         entry, status=self._retrieve(url)
         print >>sys.stderr, "%s\t%s" % (status, url) # xx logging
+        sys.stderr.flush()
 
         return entry
 
@@ -315,18 +402,25 @@ class Store(object):
         else:
             raise EntryExists(self.entry_path(id))
 
+        # xx httplib.BadStatusLine
         rsp=self.ua.get(url)
-
+        # rsp could be none if resover fails..
         # xxx slurping up. 
-        data_chunks=[rsp.read()]
+        try:
+            data_chunks=[rsp.read()]
+        except (httplib.IncompleteRead, socket.timeout), e:
+            # xx what to do..
+            raise e
 
         return self.save(id, data_chunks, self.rsp_md(rsp))
         
     def rsp_md(self, rsp):
         """ rsp --> jsonable metadata about the response """
-
+        
         return dict(headers=dict(rsp.headers.items()),
                     status=rsp.code,
+                    error_detail=getattr(rsp, 'error_message', None),
+                    error_type=getattr(rsp, 'error_type', None),
                     type=rsp.headers.type,
                     timestamp=int(unixtimestamp()),
                     url=rsp.url)
@@ -339,8 +433,19 @@ class Store(object):
             layout: 
                 {store_dir}/{id}/content|metadata
         """
+        # 
+        # todo: check if entry already exists
+        # 
+        entry=self.entry(id)
+        if os.path.exists(entry.dir_path):
+            # xxx should not happen. investigate.
+            print >>sys.stderr, 'entry exsits', entry.dir_path
+            return entry
 
         tmp_path=mkdtemp(prefix='_tmp', dir=self.store_dir)
+        # temp creats dirs with weired mode (under upstart). fix it here.
+        os.chmod(tmp_path, 0775)
+
         tmp_id=os.path.basename(tmp_path)
         tentry=self.entry(tmp_id)
         # a temp directory that's locked ($dir/lock exists and flocked)
@@ -368,8 +473,16 @@ class Store(object):
 
         # mv {id}.tmp {id}
         entry=self.entry(id)
+
+        # xx should not be here..
+        assert not os.path.exists(entry.dir_path), ('entry dir alreay exists', entry.dir_path)
         mkdir_p(entry.dir_path)
-        os.rename(tentry.dir_path, entry.dir_path)
+        try:
+            os.rename(tentry.dir_path, entry.dir_path)
+        except OSError, e:
+            print >>sys.stderr, 'failed to rename', [tentry.dir_path, entry.dir_path]
+            e.args+=(tentry.dir_path, entry.dir_path)
+            raise
         
         return entry
 
@@ -400,8 +513,41 @@ if __name__=='__main__':
         for url in line_stream():
             try:
                 print store.content(url)
-            except UrlError, e:
+                sys.stdout.flush()
+            except (UrlError, urllib2.HTTPError), e:
                 print >>sys.stderr, e
+                sys.stderr.flush()
+
+    @baker.command
+    def fetch2(store_dir='./x.urlstore', url_key='url', out_key='url_fetch_md', niceness=30.0, timeout=5.0, useragent=None, verbose=False):
+        """ see fetch
+        """
+
+        store=Store(store_dir, niceness=float(niceness), timeout=timeout, useragent=useragent)
+
+        for line in sys.stdin.readlines():
+            val=json.loads(line)
+            url=val[url_key]
+            if verbose:
+                print >>sys.stderr, url
+            try:
+                entry,fetch_status=store._retrieve(url)
+                error=None
+            except Exception, e:
+                raise
+                print >>sys.stderr,  e, url.encode('utf8')
+                sys.stderr.flush()
+                entry,fetch_status=None,'error'
+                error=dict(exception=repr(e)) # xx client error. what error code?
+
+            if entry:
+                val[out_key]=entry.md()
+                val['fetch_status']=fetch_status
+            else:
+                val[out_key]=dict(url=url, status='error', error=error, fetch_status='error')
+
+            print json.dumps(val)
+            sys.stdout.flush()
 
     @baker.command
     def fetch_json(store_dir='./x.urlstore', url_key='url', res_key='res', niceness=30, useragent=None):
@@ -416,7 +562,8 @@ if __name__=='__main__':
             try:
                 data_json=store.content(url)
             except UrlError, e:
-                print >>sys.stderr, e
+                print >>sys.stderr, e; sys.stderr.flush()
+                sys.stderr.flush()
                 continue
             data=json.loads(data_json)
             val[res_key]=data
@@ -453,4 +600,14 @@ if __name__=='__main__':
             os.rename(entry_path, new_entry_path)
         find.wait()
 
-    baker.run()
+
+    try:
+        baker.run()
+    except IOError, e:
+        if e.errno==32:
+            pass
+        else:
+            raise
+    except KeyboardInterrupt:
+        pass
+
